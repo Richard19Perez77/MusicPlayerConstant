@@ -1,21 +1,28 @@
 package music.player.constant
 
-import android.content.Context
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import music.player.constant.ui.theme.MusicPlayerConstantTheme
 
 class MainActivity : ComponentActivity() {
@@ -28,7 +35,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MusicPlayerScreen(context = this)
+                    MusicPlayerScreen()
                 }
             }
         }
@@ -36,17 +43,36 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun MusicPlayerScreen(context: Context) {
-    var isPlaying by remember { mutableStateOf(false) }
+fun MusicPlayerScreen() {
+    val context = LocalContext.current
+    val isPlaying by MusicPlayerService.isPlaying.collectAsStateWithLifecycle()
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* Playback does not depend on this; the notification may stay hidden if denied. */ }
+
+    var hasRequestedNotificationPermission by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasRequestedNotificationPermission) {
+            hasRequestedNotificationPermission = true
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // Title
         Text(
             text = "Constant Music Player",
             fontSize = 28.sp,
@@ -63,15 +89,14 @@ fun MusicPlayerScreen(context: Context) {
             modifier = Modifier.padding(bottom = 48.dp)
         )
 
-        // Status indicator
         Card(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 32.dp),
             colors = CardDefaults.cardColors(
-                containerColor = if (isPlaying) 
-                    MaterialTheme.colorScheme.primaryContainer 
-                else 
+                containerColor = if (isPlaying)
+                    MaterialTheme.colorScheme.primaryContainer
+                else
                     MaterialTheme.colorScheme.surfaceVariant
             )
         ) {
@@ -95,11 +120,9 @@ fun MusicPlayerScreen(context: Context) {
             }
         }
 
-        // Play button
         Button(
             onClick = {
                 MusicPlayerService.startService(context)
-                isPlaying = true
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -114,11 +137,9 @@ fun MusicPlayerScreen(context: Context) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Stop button
         OutlinedButton(
             onClick = {
                 MusicPlayerService.stopService(context)
-                isPlaying = false
             },
             modifier = Modifier
                 .fillMaxWidth()
@@ -133,7 +154,6 @@ fun MusicPlayerScreen(context: Context) {
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        // Info text
         Text(
             text = "The music will keep playing even when you:\n• Use other apps\n• Lock your screen\n• Play videos or other audio",
             fontSize = 14.sp,
@@ -148,6 +168,6 @@ fun MusicPlayerScreen(context: Context) {
 @Composable
 fun MusicPlayerScreenPreview() {
     MusicPlayerConstantTheme {
-        MusicPlayerScreen(context = androidx.compose.ui.platform.LocalContext.current)
+        MusicPlayerScreen()
     }
 }

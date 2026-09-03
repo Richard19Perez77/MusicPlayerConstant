@@ -16,4 +16,3 @@ local.properties
 
 # Build outputs
 /app/build/
-/gradle/

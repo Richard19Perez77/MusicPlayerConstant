@@ -8,35 +8,81 @@ A lightweight Android app that plays background music continuously, even when us
 - **Foreground Service** - Ensures the music won't be killed by the Android system
 - **Works Over Everything** - Plays alongside VLC, YouTube, TikTok, Twitter, and any other app
 - **Survives Screen Lock** - Music continues even when your screen is off
-- **Auto-Restart on Error** - Automatically recovers from playback errors
-- **Persistent Notification** - Control playback directly from your notification shade
+- **Auto-Restart on Error** - Recovers from playback errors (stops after 3 failed attempts)
+- **Persistent Notification** - Media-style notification with stop action and MediaSession support
 - **Simple Controls** - Easy start/stop interface
 - **Modern UI** - Built with Jetpack Compose and Material Design 3
 
-## Screenshots 📱
+## High-level design
 
-The app provides a clean, minimal interface with:
-- Status indicator (Playing/Stopped)
-- Start Music button
-- Stop Music button
-- Helpful information about background playback
+The app is split into a thin Compose UI and a long-running **media playback foreground service**. The activity never owns the `MediaPlayer`. It only sends start/stop commands and observes playback state published by the service.
 
-## How It Works 🔧
+```text
+┌─────────────────────┐       start / stop intents        ┌──────────────────────────┐
+│  MainActivity       │ ────────────────────────────────► │  MusicPlayerService      │
+│  (Compose UI)       │                                   │  foregroundServiceType=  │
+│                     │ ◄──────────────────────────────── │  mediaPlayback           │
+│  collect isPlaying  │       StateFlow<Boolean>          │                          │
+└─────────────────────┘                                   │  ┌────────────────────┐  │
+                                                          │  │ MediaPlayer        │  │
+                                                          │  │ assets/studywaves  │  │
+                                                          │  │ looping + wake lock│  │
+                                                          │  └────────────────────┘  │
+                                                          │  ┌────────────────────┐  │
+                                                          │  │ MediaSession       │  │
+                                                          │  │ notification Stop  │  │
+                                                          │  └────────────────────┘  │
+                                                          └──────────────────────────┘
+```
 
-The app uses an Android **Foreground Service** to maintain continuous audio playback. This ensures that:
+### Why a foreground service
 
-1. The music player runs independently of the main activity
-2. Android won't kill the service to free up memory
-3. Playback continues even when the app is closed or minimized
-4. The service automatically restarts if terminated by the system
+Android will not let a normal background service keep playing audio after the user leaves the app. `MusicPlayerService` is a foreground service of type `mediaPlayback`, so it:
 
-### Technical Implementation
+1. Runs independently of `MainActivity` (rotation, backing out, or opening another app does not stop audio)
+2. Shows an ongoing media notification, which is required for this service type
+3. Can be restarted by the system with `START_STICKY` if the process is killed, then immediately calls `startForeground()` and resumes playback
+4. Returns `START_NOT_STICKY` on a user-requested stop so the system does not bring it back
 
-- **Service Type**: Foreground Service with `mediaPlayback` type
-- **Audio Stream**: Uses `AudioAttributes` for modern Android compatibility
-- **Looping**: MediaPlayer configured for infinite loop
-- **Error Handling**: Automatic recovery and restart on playback errors
-- **Notification**: Persistent notification with stop action
+### UI and state
+
+- `MusicPlayerScreen` is a Compose screen with Start / Stop and a playing/stopped status card.
+- Playback state lives in `MusicPlayerService.isPlaying` (`StateFlow`), not in local Compose `remember` state.
+- The UI collects that flow with `collectAsStateWithLifecycle()`, so it stays correct after rotation, returning to the app, or stopping from the notification.
+- On Android 13+, the screen requests `POST_NOTIFICATIONS` once on launch so the foreground notification (and its Stop action) can appear.
+- The layout uses edge-to-edge drawing plus `safeDrawingPadding()` so controls sit clear of system bars.
+
+### Playback pipeline
+
+1. **Start** — UI calls `MusicPlayerService.startService()`, which uses `ContextCompat.startForegroundService()` with `ACTION_START`.
+2. **Foreground** — `onStartCommand` promotes the service with a media-style notification and type `FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK`.
+3. **Load** — Audio is read from `assets/studywaves.mp3` (uncompressed MP3). `MediaPlayer` is configured with `USAGE_MEDIA`, looping, and `PARTIAL_WAKE_LOCK` so playback can continue with the screen off.
+4. **Play** — `prepareAsync()` then `start()` on the prepared callback. `isPlaying` is set to `true`.
+5. **Stop** — UI, notification Stop, or MediaSession pause/stop send `ACTION_STOP`. The player is released, the notification is removed, and the service stops.
+
+`ACTION_START` and a **null** sticky-restart intent both take the “keep playing” path. Only `ACTION_STOP` shuts the service down.
+
+### MediaSession and notification
+
+A `MediaSessionCompat` is created when the service starts. It publishes metadata and playback state, and the notification uses `MediaStyle` so Android can treat this as real media playback (lock screen / system media controls). The notification is ongoing (not swipe-dismissible) and includes a Stop action that delivers `ACTION_STOP` to the already-running service.
+
+### Error handling
+
+`PlaybackRetryTracker` caps automatic recovery at **3** failures. A decoder or file error releases the current `MediaPlayer`, retries, and if the cap is hit, shows an error and shuts the service down. That avoids an infinite prepare/error loop. `isPlaying` / `stop()` / `release()` are wrapped so a player in the error state cannot crash the service.
+
+### Audio focus (intentional)
+
+The service does **not** request audio focus. Other apps can play at the same time (YouTube, VLC, TikTok, and so on). That is a product choice for “study music under everything,” not an oversight.
+
+### Key files
+
+| File | Role |
+|------|------|
+| `MainActivity.kt` | Compose UI, notification permission, start/stop commands |
+| `MusicPlayerService.kt` | Foreground service, player, MediaSession, notification, published state |
+| `PlaybackRetryTracker.kt` | Retry budget for playback errors |
+| `assets/studywaves.mp3` | Looping audio track |
+| `AndroidManifest.xml` | Permissions and `foregroundServiceType="mediaPlayback"` |
 
 ## Getting Started 🚀
 
@@ -44,7 +90,7 @@ The app uses an Android **Foreground Service** to maintain continuous audio play
 
 - Android Studio Hedgehog or newer
 - Android SDK 24+ (Android 7.0 Nougat)
-- Target SDK 36
+- Target SDK 37
 
 ### Installation
 
@@ -64,25 +110,20 @@ cd MusicPlayerConstant
 
 To replace the study music with your own audio file:
 
-1. Place your audio file in `app/src/main/res/raw/`
-2. Update the resource reference in `MusicPlayerService.kt`:
-
-```kotlin
-val uri = "android.resource://$packageName/${R.raw.your_audio_file}".toUri()
-```
+1. Place your audio file in `app/src/main/assets/`
+2. Update the asset name in `MusicPlayerService.kt` (`AUDIO_ASSET`)
 
 Supported formats: MP3, WAV, OGG, AAC
 
 ## Usage 📖
 
-1. **Launch the app** and grant notification permission (Android 13+)
+1. **Launch the app** and grant notification permission when prompted (Android 13+)
 2. **Tap "Start Music"** to begin playback
 3. **Use other apps freely** - the music will continue playing
 4. **Check your notification shade** to see the music player notification
 5. **Stop playback** by:
    - Tapping "Stop Music" in the app, or
-   - Tapping "Stop" in the notification, or
-   - Swiping away the notification
+   - Tapping "Stop" in the notification
 
 ## Permissions 🔐
 
@@ -98,12 +139,13 @@ The app requires the following permissions:
 ```
 app/src/main/
 ├── java/music/player/constant/
-│   ├── MainActivity.kt              # UI with Jetpack Compose
-│   ├── MusicPlayerService.kt        # Background service for playback
+│   ├── MainActivity.kt              # Compose UI; observes service state
+│   ├── MusicPlayerService.kt        # Foreground service, player, MediaSession
+│   ├── PlaybackRetryTracker.kt      # Caps automatic error retries
 │   └── ui/theme/                    # Material Design theme
+├── assets/
+│   └── studywaves.mp3               # Looping audio track
 ├── res/
-│   ├── raw/
-│   │   └── studywaves.mp3          # Audio file
 │   └── values/
 │       ├── strings.xml
 │       ├── colors.xml
@@ -115,15 +157,16 @@ app/src/main/
 
 ### Minimum Requirements
 - **minSdk**: 24 (Android 7.0 Nougat)
-- **targetSdk**: 36
-- **Kotlin**: 1.9+
+- **targetSdk**: 37
+- **Kotlin**: 2.2+
 - **Compose**: Latest stable
 
 ### Dependencies
 - AndroidX Core KTX
-- AndroidX Lifecycle Runtime
+- AndroidX Lifecycle Runtime (including Compose)
 - Jetpack Compose (Material 3)
 - AndroidX Activity Compose
+- AndroidX Media (`MediaSessionCompat` / media-style notifications)
 
 ## Building the App 🔨
 
@@ -167,7 +210,7 @@ Potential improvements for future versions:
 - Check if notifications are enabled for the app
 
 ### Music doesn't start
-- Verify the audio file exists in `res/raw/`
+- Verify the audio file exists in `assets/`
 - Check logcat for error messages
 - Ensure proper permissions are granted
 
@@ -189,4 +232,3 @@ For questions or suggestions, please open an issue on GitHub.
 ---
 
 **Built with ❤️ using Kotlin and Jetpack Compose**
-
